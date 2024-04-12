@@ -1,0 +1,117 @@
+#!/usr/bin/env python
+
+from pygls.server import LanguageServer
+import logging
+import subprocess
+import tempfile
+
+from lsprotocol.types import (
+    TEXT_DOCUMENT_DID_OPEN,
+    TEXT_DOCUMENT_DID_CHANGE,
+    DidOpenTextDocumentParams,
+    DidChangeTextDocumentParams,
+    Diagnostic,
+    DiagnosticSeverity,
+    Range,
+    Position
+)
+
+logging.basicConfig(filename='/tmp/pygls.log', filemode='w', level=logging.DEBUG)
+
+server = LanguageServer("odelang-server", "v0.1")
+
+@server.feature(TEXT_DOCUMENT_DID_OPEN)
+def did_open(ls, params: DidOpenTextDocumentParams):
+    _validate(ls, params)
+
+
+@server.feature(TEXT_DOCUMENT_DID_CHANGE)
+def did_change(ls, params: DidChangeTextDocumentParams):
+    _validate(ls, params)
+
+def parse_compiler_output(result):
+    lines = result.split('\n')
+
+    diagnostics = []
+    reported_lines = []
+
+    logging.debug("Parsing compiler output...: ", result)
+
+    for line in lines:
+        if line:
+            splitted_line = line.split(" ")
+
+            if "parser" in splitted_line: continue
+
+            if "Warning" in splitted_line[0]:
+                diag = line.split(" - ")[1].strip()
+                
+                line_n = int(diag.split()[-1][:2])
+
+                d = Diagnostic(
+                    range = Range(
+                        start = Position(line=line_n-1, character=0),
+                        end   = Position(line=line_n-1, character=0),
+                    ),
+                        message = diag[:diag.index("'") + 1],
+                        severity = DiagnosticSeverity.Warning
+                    )
+
+                diagnostics.append(d)
+            else:
+                diag = line.split(":")[1].strip()
+
+                if "ODE(s)" in diag:
+                    d = Diagnostic(
+                        range = Range(
+                            start = Position(line=0, character=0),
+                            end   = Position(line=0, character=0),
+                        ),
+                            message=diag,
+                    )
+
+                    diagnostics.append(d)
+                else:
+
+                    line_n = int(splitted_line[4])
+
+                    if line_n not in reported_lines:
+
+                        d = Diagnostic(
+                            range = Range(
+                                start = Position(line=line_n - 1, character=0),
+                                end   = Position(line=line_n - 1, character=0),
+                            ),
+                                message=diag,
+                        )
+                        
+                        reported_lines.append(line_n)
+
+                        diagnostics.append(d)
+
+    return diagnostics
+
+
+def _validate(ls, params):
+
+    ls.show_message_log("Validating code...\n")
+
+    text_doc = ls.workspace.get_document(params.text_document.uri)
+
+    source = text_doc.source
+    diagnostics = _validate_ode_file(source) if source else []
+
+    ls.publish_diagnostics(text_doc.uri, diagnostics)
+
+def _validate_ode_file(source):
+
+    with tempfile.NamedTemporaryFile(delete=True) as fp:
+        fp.write(str.encode(source))
+        fp.flush() 
+        
+        result = subprocess.run(['/old_home/sachetto/Projects/odecompiler/bin/odec', '-i', fp.name, '-o', '/tmp/teste'], stderr=subprocess.PIPE)
+
+        return parse_compiler_output(result.stderr.decode('utf-8'))
+
+
+server.start_io()
